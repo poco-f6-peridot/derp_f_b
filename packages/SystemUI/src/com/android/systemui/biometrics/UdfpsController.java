@@ -120,6 +120,9 @@ import kotlin.Unit;
 import kotlinx.coroutines.CoroutineScope;
 import kotlinx.coroutines.ExperimentalCoroutinesApi;
 
+import java.io.FileInputStream;
+import java.io.FileWriter;
+import java.io.IOException;
 import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -290,7 +293,44 @@ public class UdfpsController implements DozeReceiver, Dumpable {
                     updateUdfpsAnimation();
                 }
             };
-            
+
+    private void startFodPressPolling() {
+        new Thread(() -> {
+            try (FileInputStream fis = new FileInputStream("/sys/class/touch/touch_dev/fod_press_status")) {
+                byte[] buffer = new byte[1];
+                while (true) {
+                    int rc = fis.read(buffer);
+                    Log.d(TAG, "fod_press_status was successfully opened");
+                    if (rc == 1) {
+                        boolean pressed = buffer[0] != '0';
+                        Log.d(TAG, "fod_press_status value" + pressed);
+                        handleFodPressStatus(pressed);
+                    }
+                    fis.getChannel().position(0); // Reset position for next read
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Error reading fod_press_status", e);
+            }
+        }).start();
+    }
+
+    // Write the display parameter to the sysfs node
+    private void setDispParam(String value) {
+        try (FileWriter writer = new FileWriter("/sys/devices/virtual/mi_display/disp_feature/disp-DSI-0/disp_param")) {
+            Log.d(TAG, "Disp_param was able to set");
+            writer.write("9 " + value); // Local HBM setting (9 for HBM mode, 0/1 for on/off)
+        } catch (IOException e) {
+            Log.e(TAG, "Failed to set display parameter", e);
+        }
+    }
+    
+    // Set the state of the FOD sensor
+    private void setFingerDown(boolean pressed) {
+        String hbmMode = pressed ? "1" : "0";
+        Log.d(TAG, "Finger down detected");
+        setDispParam(hbmMode); // Set the display parameter (local HBM mode)
+    }
+
     private static void xaiomiTouchFeature(int arg) {
         try {
             if (xaiomiTouchFeatureAidl == null) {
@@ -311,6 +351,12 @@ public class UdfpsController implements DozeReceiver, Dumpable {
         } catch(Throwable t) {
             android.util.Log.e("FP-HAX", "TouchFeature", t);
         }
+    }
+
+    private void handleFodPressStatus(boolean pressed) {
+        Log.d(TAG, "FOD press status: " + (pressed ? "PRESSED" : "RELEASED"));
+        xiaomiFingerprintExtension(pressed ? 1 : 0);  // Trigger fingerprint extension command
+        xaiomiTouchFeature(pressed ? 1 : 0);          // Trigger touch feature based on press status
     }
 
     private static void xiaomiFingerprintExtension(int arg) {
@@ -1271,8 +1317,9 @@ public class UdfpsController implements DozeReceiver, Dumpable {
             }
         }
 
-        xaiomiTouchFeature(1);
+        setFingerDown(true);
         xiaomiFingerprintExtension(1);
+        xaiomiTouchFeature(1);
 
         for (Callback cb : mCallbacks) {
             cb.onFingerDown();
@@ -1328,8 +1375,9 @@ public class UdfpsController implements DozeReceiver, Dumpable {
         unconfigureDisplay(view);
         cancelAodSendFingerUpAction();
 
-        xaiomiTouchFeature(0);
+        setFingerDown(false);
         xiaomiFingerprintExtension(0);
+        xaiomiTouchFeature(0);
 
         // Add a delay to ensure that the dim amount is updated after the display has had chance
         // to switch out of HBM mode. The delay, in ms is stored in config_udfpsDimmingDisableDelay.
